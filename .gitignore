@@ -127,3 +127,21 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Vagrant
+.vagrant/
+data/
+
+# SQLite
+*.sqlite3
+
+# Other
+public/
+logs/
+
+# Coding standards for vscode
+.vscode
+.editorconfig
+
+# 2to3 generated files
+*.bak

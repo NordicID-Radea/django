@@ -1,0 +1,173 @@
+---
+- hosts: localhost
+  become: yes
+  connection: local
+  gather_facts: yes
+  vars:
+    dev_database_host: "localhost"
+    dev_database_name: "radea"
+    dev_database_user: "nid"
+    dev_database_password: "nid"
+    local_user: "nid"
+    python_version: "python3.7"
+    django_project_name: "radea"
+    django_settings_file: "radea.settings"
+  vars_files:
+    - "{{ playbook_dir }}/vault"
+
+  tasks:
+    - name: Install requirements
+      pip:
+        name:
+          - psycopg2-binary
+          - virtualenv
+      tags: always
+
+    - name: Configure pg_hba.conf
+      postgresql_pg_hba:
+        dest: /etc/postgresql/10/main/pg_hba.conf
+        contype: host
+        users: all
+        source: 0.0.0.0/1
+        databases: all
+        method: trust
+        create: true
+      tags: always
+
+    - name: Restart postgresql service
+      service:
+        name: postgresql
+        state: restarted
+        enabled: yes
+      tags: always
+
+    - name: Cleanup psql database
+      postgresql_db:
+        name: "{{ dev_database_name }}"
+        state: absent
+      become_user: postgres
+      tags: cleanupdb
+
+    - name: Set environment variables
+      lineinfile:
+        path: /etc/environment
+        regexp: '^{{ item.var }}='
+        line: '{{ item.var }}="{{ item.value }}"'
+      with_items:
+        - { var: 'ANSIBLE_STDOUT_CALLBACK', value: 'debug' }
+        - { var: 'DJANGO_SETTINGS_MODULE', value: '{{ django_settings_file }}' }
+        - { var: 'DJANGO_ENVIRONMENT', value: 'development' }
+        - { var: 'SECRET_KEY', value: '{{ dev_secret_key }}' }
+        - { var: 'DJANGO_DEBUG_MODE', value: 'True' }
+        - { var: 'ALLOWED_HOSTS', value: "*" }
+        - { var: 'LOG_FILE_PATH', value: '{{ playbook_dir }}/{{ django_project_name }}/logs' }
+      no_log: yes
+      tags: env
+
+    - name: Configure postgresql.conf to allow all host access
+      postgresql_set:
+        name: "{{ item.var }}"
+        value: "{{ item.value }}"
+      with_items:
+        - { var: 'listen_addresses', value: "*" }
+      become_user: postgres
+      tags: db
+
+    - name: Create database
+      postgresql_db:
+        name: "{{ dev_database_name }}"
+        encoding: "UTF-8"
+      become_user: postgres
+      tags: db
+
+    - name: Connect to db and create user
+      postgresql_user:
+        db: "{{ dev_database_name }}"
+        name: "{{ dev_database_user }}"
+        password: "{{ dev_database_password }}"
+        role_attr_flags: SUPERUSER
+        expires: infinity
+        priv: ALL
+      become_user: postgres
+      tags: db
+
+    - name: Connect to postgres and grant ALL PRIVILEGES
+      postgresql_user:
+        db: postgres
+        name: "{{ dev_database_user }}"
+        expires: infinity
+        priv: ALL
+      become_user: postgres
+      tags: db
+
+    - name: Restart postgresql service
+      service:
+        name: postgresql
+        state: restarted
+        enabled: yes
+      tags: db
+
+    - name: Setup pghero
+      shell: |
+          sudo pghero config:set PORT=3001
+          sudo pghero config:set DATABASE_URL=postgres://{{ dev_database_user }}:{{ dev_database_password }}@127.0.0.1/{{ dev_database_name }}
+          sudo pghero scale web=1
+      tags: db
+
+    - name: Restart pghero service
+      service:
+       name: pghero
+       state: restarted
+      tags: db
+
+    - name: Install python requirements.txt
+      pip:
+        requirements: "{{ playbook_dir }}/{{ django_project_name }}/requirements.txt"
+        virtualenv: "{{ playbook_dir }}/venv"
+        virtualenv_python: "{{ python_version }}"
+      become_user: "{{ local_user }}"
+      tags: pip
+
+    - name: Check if requirements-dev.txt exists
+      stat:
+        path: "{{ playbook_dir }}/{{ django_project_name }}/requirements-dev.txt"
+      register: requirements
+      tags: pip
+
+    - name: Install python requirements-dev.txt
+      pip:
+        requirements: "{{ playbook_dir }}/{{ django_project_name }}/requirements-dev.txt"
+        virtualenv: "{{ playbook_dir }}/venv"
+        virtualenv_python: "{{ python_version }}"
+      become_user: "{{ local_user }}"
+      when: requirements.stat.exists
+      tags: pip
+
+    - name: Add github.com to known_hosts
+      known_hosts: "path='/home/{{ local_user }}/.ssh/known_hosts' name='github.com' key=\"{{ lookup('pipe', 'ssh-keyscan -t rsa github.com') }}\""
+      tags: pip
+
+    - name: Run Django Migrate
+      django_manage:
+        command: migrate
+        app_path: "{{ playbook_dir }}/{{ django_project_name }}"
+        virtualenv: "{{ playbook_dir }}/venv"
+        pythonpath: "{{ playbook_dir }}/venv/bin/python"
+      environment:
+        DJANGO_SETTINGS_MODULE: "{{ django_settings_file }}"
+        SECRET_KEY: "{{ dev_secret_key }}"
+        DB_HOST: "{{ dev_database_host }}"
+        DB_NAME: "{{ dev_database_name }}"
+        DB_USER: "{{ dev_database_user }}"
+        DB_PASSWORD: "{{ dev_database_password }}"
+      tags: django
+      become_user: "{{ local_user }}"
+
+    - name: Create logs directory
+      file:
+        path: "{{ playbook_dir }}/logs"
+        state: directory
+        owner: "{{ local_user }}"
+        group: "{{ local_user }}"
+        mode: '0775'
+        recurse: yes

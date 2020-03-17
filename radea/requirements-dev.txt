@@ -1,0 +1,10 @@
+# dependencies for dev and testing environments
+coverage
+django-jenkins
+django-smoke-tests
+pep8
+pyflakes
+pytest
+pylint
+pylint-django
+tblib
